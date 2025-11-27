@@ -248,14 +248,29 @@ export default {
                     
                     // 为每个IP生成节点
                     const 订阅内容 = 优选IP列表.map((优选地址, index) => {
-                        const ipMatch = 优选地址.match(/^(\[?[\da-fA-F:]+\]?|[\d.]+)(?::(\d+))?(?:#(.+))?$/);
-                        if (!ipMatch) return null;
+                        // 提取纯IP地址（IPv4或IPv6），忽略端口和备注
+                        // 支持格式：1.2.3.4  或  1.2.3.4:443  或  1.2.3.4#备注  或  1.2.3.4:443#备注
+                        //         [2001::1]  或  [2001::1]:443  或  [2001::1]#备注
+                        let 纯IP;
                         
-                        const [, ip, customPort, customRemark] = ipMatch;
-                        const 使用端口 = customPort || port;
-                        const 节点备注 = customRemark || `${decodeURIComponent(remark)}-${index + 1}`;
+                        // 匹配 IPv6 格式 [xxxx:xxxx::xxxx]
+                        const ipv6Match = 优选地址.match(/^(\[[0-9a-fA-F:]+\])/);
+                        if (ipv6Match) {
+                            纯IP = ipv6Match[1];
+                        } else {
+                            // 匹配 IPv4 格式，提取冒号或井号之前的部分
+                            const ipv4Match = 优选地址.match(/^([0-9.]+)/);
+                            if (ipv4Match) {
+                                纯IP = ipv4Match[1];
+                            } else {
+                                return null;
+                            }
+                        }
                         
-                        return `vless://${uuid}@${ip}:${使用端口}?${params}#${encodeURIComponent(节点备注)}`;
+                        const 节点备注 = `${decodeURIComponent(remark)}-${index + 1}`;
+                        
+                        // 完全使用模板的配置，只替换IP地址
+                        return `vless://${uuid}@${纯IP}:${port}?${params}#${encodeURIComponent(节点备注)}`;
                     }).filter(item => item !== null).join('\n');
                     
                     const ua = UA.toLowerCase();
