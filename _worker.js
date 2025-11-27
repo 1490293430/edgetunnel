@@ -169,6 +169,16 @@ export default {
                             console.error('保存自定义IP失败:', error);
                             return new Response(JSON.stringify({ error: '保存自定义IP失败: ' + error.message }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
                         }
+                    } else if (访问路径 === 'admin/fixed-config.txt') { // 保存固定配置信息
+                        try {
+                            const fixedConfig = await request.text();
+                            await env.KV.put('fixed-config.txt', fixedConfig);// 保存到 KV
+                            ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Save_Fixed_Config', config_JSON));
+                            return new Response(JSON.stringify({ success: true, message: '固定配置信息已保存' }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        } catch (error) {
+                            console.error('保存固定配置信息失败:', error);
+                            return new Response(JSON.stringify({ error: '保存固定配置信息失败: ' + error.message }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        }
                     } else return new Response(JSON.stringify({ error: '不支持的POST请求路径' }), { status: 404, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
                 } else if (访问路径 === 'admin/config.json') {// 处理 admin/config.json 请求，返回JSON
                     return new Response(JSON.stringify(config_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -176,6 +186,9 @@ export default {
                     let 本地优选IP = await env.KV.get('ADD.txt') || 'null';
                     if (本地优选IP == 'null') 本地优选IP = (await 生成随机IP(request, config_JSON.优选订阅生成.本地IP库.随机数量, config_JSON.优选订阅生成.本地IP库.指定端口))[1];
                     return new Response(本地优选IP, { status: 200, headers: { 'Content-Type': 'text/plain;charset=utf-8', 'asn': request.cf.asn } });
+                } else if (访问路径 === 'admin/fixed-config.txt') {// 处理 admin/fixed-config.txt 请求，返回固定配置信息
+                    const 固定配置 = await env.KV.get('fixed-config.txt') || '';
+                    return new Response(固定配置, { status: 200, headers: { 'Content-Type': 'text/plain;charset=utf-8' } });
                 } else if (访问路径 === 'admin/cf.json') {// CF配置文件
                     return new Response(JSON.stringify(request.cf, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
                 }
@@ -186,6 +199,80 @@ export default {
                 const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
                 响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
                 return 响应;
+            } else if (访问路径 === 'fixed-sub') {//处理固定订阅请求
+                const 订阅TOKEN = await MD5MD5(host + userID);
+                if (url.searchParams.get('token') === 订阅TOKEN) {
+                    config_JSON = await 读取config_JSON(env, host, userID);
+                    ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_Fixed_SUB', config_JSON));
+                    
+                    // 获取固定配置信息
+                    const 固定配置模板 = await env.KV.get('fixed-config.txt');
+                    if (!固定配置模板) {
+                        return new Response('固定配置信息未设置', { status: 404 });
+                    }
+                    
+                    // 解析固定配置的vless链接，提取参数
+                    const vlessRegex = /vless:\/\/([^@]+)@([^:]+):([^?]+)\?(.+)#(.+)/;
+                    const match = 固定配置模板.match(vlessRegex);
+                    if (!match) {
+                        return new Response('固定配置信息格式错误', { status: 400 });
+                    }
+                    
+                    const [, uuid, originalIP, port, params, remark] = match;
+                    
+                    // 获取优选IP列表（支持优选API）
+                    const 完整优选列表 = config_JSON.优选订阅生成.本地IP库.随机IP 
+                        ? (await 生成随机IP(request, config_JSON.优选订阅生成.本地IP库.随机数量, config_JSON.优选订阅生成.本地IP库.指定端口))[0] 
+                        : await env.KV.get('ADD.txt') 
+                            ? await 整理成数组(await env.KV.get('ADD.txt')) 
+                            : (await 生成随机IP(request, config_JSON.优选订阅生成.本地IP库.随机数量, config_JSON.优选订阅生成.本地IP库.指定端口))[0];
+                    
+                    // 分类处理：优选API、普通IP、其他协议链接
+                    const 优选API = [], 优选IP = [];
+                    for (const 元素 of 完整优选列表) {
+                        if (元素.toLowerCase().startsWith('https://')) {
+                            优选API.push(元素);
+                        } else if (!元素.toLowerCase().includes('://')) {
+                            // 只接受IP地址格式（IPv4、IPv6、带端口、带备注）
+                            if (/^(\[?[\da-fA-F:]+\]?|[\d.]+)(?::(\d+))?(?:#(.+))?$/.test(元素)) {
+                                优选IP.push(元素);
+                            }
+                        }
+                    }
+                    
+                    // 从优选API获取IP
+                    const 优选API的IP = await 请求优选API(优选API);
+                    
+                    // 合并所有IP（去重）
+                    const 优选IP列表 = [...new Set(优选IP.concat(优选API的IP))];
+                    
+                    // 为每个IP生成节点
+                    const 订阅内容 = 优选IP列表.map((优选地址, index) => {
+                        const ipMatch = 优选地址.match(/^(\[?[\da-fA-F:]+\]?|[\d.]+)(?::(\d+))?(?:#(.+))?$/);
+                        if (!ipMatch) return null;
+                        
+                        const [, ip, customPort, customRemark] = ipMatch;
+                        const 使用端口 = customPort || port;
+                        const 节点备注 = customRemark || `${decodeURIComponent(remark)}-${index + 1}`;
+                        
+                        return `vless://${uuid}@${ip}:${使用端口}?${params}#${encodeURIComponent(节点备注)}`;
+                    }).filter(item => item !== null).join('\n');
+                    
+                    const ua = UA.toLowerCase();
+                    const responseHeaders = {
+                        "content-type": "text/plain; charset=utf-8",
+                        "Profile-Update-Interval": config_JSON.优选订阅生成.SUBUpdateTime,
+                        "Profile-web-page-url": url.protocol + '//' + url.host + '/admin',
+                        "Cache-Control": "no-store",
+                    };
+                    
+                    if (!ua.includes('mozilla')) {
+                        responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent('固定订阅-' + config_JSON.优选订阅生成.SUBNAME)}`;
+                    }
+                    
+                    return new Response(btoa(订阅内容), { status: 200, headers: responseHeaders });
+                }
+                return new Response('无效的订阅TOKEN', { status: 403 });
             } else if (访问路径 === 'sub') {//处理订阅请求
                 const 订阅TOKEN = await MD5MD5(host + userID);
                 if (url.searchParams.get('token') === 订阅TOKEN) {
@@ -301,7 +388,9 @@ export default {
                     return new Response(订阅内容, { status: 200, headers: responseHeaders });
                 }
                 return new Response('无效的订阅TOKEN', { status: 403 });
-            } else if (访问路径 === 'locations') return fetch(new Request('https://speed.cloudflare.com/locations'));
+            } else if (访问路径 === 'locations') {
+                return fetch(new Request('https://speed.cloudflare.com/locations'));
+            }
         } else if (管理员密码) {// ws代理
             await 反代参数获取(request);
             return await 处理WS请求(request, userID);
@@ -865,6 +954,7 @@ async function 读取config_JSON(env, hostname, userID, 重置配置 = false) {
             SUBUpdateTime: 6, // 订阅更新时间（小时）
             TOKEN: await MD5MD5(hostname + userID),
         },
+        固定配置信息: null,
         订阅转换配置: {
             SUBAPI: "https://SUBAPI.cmliussss.net",
             SUBCONFIG: "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/refs/heads/master/Clash/config/ACL4SSR_Online_Mini_MultiMode.ini",
@@ -950,6 +1040,15 @@ async function 读取config_JSON(env, hostname, userID, 重置配置 = false) {
         }
     } catch (error) {
         console.error(`读取cf.json出错: ${error.message}`);
+    }
+
+    // 读取固定配置信息
+    try {
+        const 固定配置 = await env.KV.get('fixed-config.txt');
+        config_JSON.固定配置信息 = 固定配置 || null;
+    } catch (error) {
+        console.error(`读取fixed-config.txt出错: ${error.message}`);
+        config_JSON.固定配置信息 = null;
     }
 
     config_JSON.加载时间 = (performance.now() - 初始化开始时间).toFixed(2) + 'ms';
@@ -1344,23 +1443,302 @@ async function nginx() {
 	<title>Welcome to nginx!</title>
 	<style>
 		body {
-			width: 35em;
+			width: 90%;
+			max-width: 1200px;
 			margin: 0 auto;
 			font-family: Tahoma, Verdana, Arial, sans-serif;
+			padding: 20px;
+		}
+		.nginx-header {
+			border-bottom: 2px solid #ddd;
+			padding-bottom: 15px;
+			margin-bottom: 20px;
+		}
+		.fixed-sub-section {
+			background: #f9f9f9;
+			border: 1px solid #ddd;
+			border-radius: 8px;
+			padding: 20px;
+			margin: 20px 0;
+		}
+		.fixed-sub-section h2 {
+			color: #009688;
+			margin-top: 0;
+		}
+		.section-title {
+			color: #333;
+			border-bottom: 1px solid #eee;
+			padding-bottom: 8px;
+			margin-bottom: 15px;
+		}
+		.form-group {
+			margin-bottom: 15px;
+		}
+		.form-group label {
+			display: block;
+			margin-bottom: 5px;
+			font-weight: bold;
+			color: #555;
+		}
+		.form-group input[type="text"],
+		.form-group textarea {
+			width: 100%;
+			padding: 10px;
+			border: 1px solid #ddd;
+			border-radius: 4px;
+			font-family: monospace;
+			font-size: 14px;
+			box-sizing: border-box;
+		}
+		.form-group textarea {
+			min-height: 100px;
+			resize: vertical;
+		}
+		.url-display {
+			display: flex;
+			gap: 10px;
+			align-items: center;
+		}
+		.url-display input {
+			flex: 1;
+		}
+		.btn {
+			padding: 10px 20px;
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 14px;
+			transition: all 0.3s;
+		}
+		.btn-primary {
+			background: #009688;
+			color: white;
+		}
+		.btn-primary:hover {
+			background: #00796b;
+		}
+		.btn-success {
+			background: #4caf50;
+			color: white;
+		}
+		.btn-success:hover {
+			background: #45a049;
+		}
+		.btn-secondary {
+			background: #757575;
+			color: white;
+		}
+		.btn-secondary:hover {
+			background: #616161;
+		}
+		.info-box {
+			background: #e3f2fd;
+			border-left: 4px solid #2196f3;
+			padding: 12px;
+			margin-bottom: 15px;
+			border-radius: 4px;
+		}
+		.success-msg, .error-msg {
+			padding: 12px;
+			border-radius: 4px;
+			margin-bottom: 15px;
+			display: none;
+		}
+		.success-msg {
+			background: #d4edda;
+			border-left: 4px solid #28a745;
+			color: #155724;
+		}
+		.error-msg {
+			background: #f8d7da;
+			border-left: 4px solid #dc3545;
+			color: #721c24;
+		}
+		.admin-link {
+			display: inline-block;
+			margin-top: 10px;
+			color: #009688;
+			text-decoration: none;
+			font-weight: bold;
+		}
+		.admin-link:hover {
+			color: #00796b;
+			text-decoration: underline;
+		}
+		.new-badge {
+			display: inline-block;
+			background: #ff5722;
+			color: white;
+			padding: 2px 8px;
+			border-radius: 3px;
+			font-size: 12px;
+			margin-left: 8px;
 		}
 	</style>
 	</head>
 	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and
-	working. Further configuration is required.</p>
-	
-	<p>For online documentation and support please refer to
-	<a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at
-	<a href="http://nginx.com/">nginx.com</a>.</p>
-	
-	<p><em>Thank you for using nginx.</em></p>
+	<div class="nginx-header">
+		<h1>Welcome to nginx!</h1>
+		<p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p>
+		<p>For online documentation and support please refer to <a href="http://nginx.org/">nginx.org</a>.<br/>
+		Commercial support is available at <a href="http://nginx.com/">nginx.com</a>.</p>
+		<p><em>Thank you for using nginx.</em></p>
+	</div>
+
+	<div class="fixed-sub-section">
+		<h2>🚀 EdgeTunnel 固定订阅 <span class="new-badge">NEW</span></h2>
+		
+		<div class="info-box">
+			<p><strong>💡 提示：</strong>这是一个新功能，可以使用固定的节点配置模板，自动替换IP生成多个节点订阅。</p>
+			<p>需要使用其他功能？请访问 <a href="/admin" class="admin-link">管理后台</a></p>
+		</div>
+
+		<div class="form-group">
+			<label>📡 固定订阅连接</label>
+			<div class="url-display">
+				<input type="text" id="fixed-sub-url" readonly placeholder="加载中...">
+				<button class="btn btn-primary" onclick="copyText('fixed-sub-url')">复制</button>
+			</div>
+		</div>
+
+		<hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
+
+		<h3 class="section-title">🔧 固定配置信息</h3>
+		<div id="fixed-config-msg" class="success-msg"></div>
+		<div id="fixed-config-error" class="error-msg"></div>
+		
+		<div class="info-box">
+			<p><strong>使用说明：</strong></p>
+			<p>• 输入一个完整的 vless 链接作为模板</p>
+			<p>• 客户端使用固定订阅时，会自动将模板中的IP替换为优选IP</p>
+			<p>• 支持从优选API自动拉取最新IP，为每个IP生成独立节点</p>
+		</div>
+		
+		<div class="form-group">
+			<label>固定配置模板 (vless://...)</label>
+			<textarea id="fixed-config" placeholder="示例：vless://uuid@ip:port?参数#备注"></textarea>
+		</div>
+		
+		<button class="btn btn-success" onclick="saveFixedConfig()">💾 保存固定配置</button>
+		<button class="btn btn-secondary" onclick="loadFixedConfig()">🔄 刷新</button>
+
+		<hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
+
+		<h3 class="section-title">🌐 优选IP配置</h3>
+		
+		<div class="info-box" style="background: #fff3cd; border-left-color: #ffc107;">
+			<p><strong>💡 说明：</strong></p>
+			<p>• 固定订阅使用的优选IP需要在 <a href="/admin" style="color: #009688; font-weight: bold;">管理后台</a> 中配置</p>
+			<p>• 进入管理后台 → 优选订阅生成 → 自定义优选地址</p>
+			<p>• 支持配置普通IP地址和优选API（https://开头的链接）</p>
+			<p>• 固定订阅会自动拉取优选API的IP，并应用到固定配置模板生成节点</p>
+		</div>
+		
+		<a href="/admin"><button class="btn btn-primary" style="width: 100%;">进入管理后台配置优选IP →</button></a>
+	</div>
+
+	<script>
+		let config = {};
+		window.onload = async function() { 
+			await loadConfig(); 
+			await loadFixedConfig(); 
+		};
+
+		async function loadConfig() {
+			try {
+				const response = await fetch('/admin/config.json');
+				if (response.ok) {
+					config = await response.json();
+					const baseUrl = window.location.origin;
+					const token = config.优选订阅生成.TOKEN;
+					document.getElementById('fixed-sub-url').value = \`\${baseUrl}/fixed-sub?token=\${token}\`;
+				} else {
+					document.getElementById('fixed-sub-url').value = '请先设置管理密码并配置';
+				}
+			} catch (error) {
+				console.error('加载配置失败:', error);
+				document.getElementById('fixed-sub-url').value = '加载失败';
+			}
+		}
+
+		async function loadFixedConfig() {
+			try {
+				const response = await fetch('/admin/fixed-config.txt');
+				if (response.ok) {
+					const text = await response.text();
+					document.getElementById('fixed-config').value = text;
+				}
+			} catch (error) {
+				console.error('加载固定配置失败:', error);
+			}
+		}
+
+		async function saveFixedConfig() {
+			const configText = document.getElementById('fixed-config').value.trim();
+			if (!configText) {
+				showError('fixed-config', '请输入固定配置信息');
+				return;
+			}
+			if (!configText.startsWith('vless://')) {
+				showError('fixed-config', '配置格式错误，必须是 vless:// 开头的链接');
+				return;
+			}
+			try {
+				const response = await fetch('/admin/fixed-config.txt', {
+					method: 'POST',
+					body: configText
+				});
+				if (response.ok) {
+					showSuccess('fixed-config', '✅ 固定配置保存成功！');
+				} else {
+					const error = await response.json();
+					showError('fixed-config', '保存失败: ' + (error.error || '未知错误'));
+				}
+			} catch (error) {
+				showError('fixed-config', '保存失败: ' + error.message);
+			}
+		}
+
+		function copyText(elementId) {
+			const input = document.getElementById(elementId);
+			input.select();
+			document.execCommand('copy');
+			const btn = event.target;
+			const originalText = btn.textContent;
+			btn.textContent = '✓ 已复制!';
+			btn.style.background = '#4caf50';
+			setTimeout(() => {
+				btn.textContent = originalText;
+				btn.style.background = '';
+			}, 2000);
+		}
+
+		function showSuccess(prefix, message) {
+			const msgEl = document.getElementById(\`\${prefix}-msg\`);
+			const errEl = document.getElementById(\`\${prefix}-error\`);
+			if (msgEl) {
+				msgEl.textContent = message;
+				msgEl.style.display = 'block';
+				if (errEl) errEl.style.display = 'none';
+				setTimeout(() => {
+					msgEl.style.display = 'none';
+				}, 5000);
+			}
+		}
+
+		function showError(prefix, message) {
+			const msgEl = document.getElementById(\`\${prefix}-msg\`);
+			const errEl = document.getElementById(\`\${prefix}-error\`);
+			if (errEl) {
+				errEl.textContent = message;
+				errEl.style.display = 'block';
+				if (msgEl) msgEl.style.display = 'none';
+				setTimeout(() => {
+					errEl.style.display = 'none';
+				}, 5000);
+			}
+		}
+	</script>
 	</body>
 	</html>
 	`
