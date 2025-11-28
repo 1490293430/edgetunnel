@@ -288,6 +288,46 @@ export default {
                     return new Response(btoa(订阅内容), { status: 200, headers: responseHeaders });
                 }
                 return new Response('无效的订阅TOKEN', { status: 403 });
+            } else if (访问路径 === 'fixed-clash') {//处理固定订阅Clash请求
+                const 订阅TOKEN = await MD5MD5(host + userID);
+                if (url.searchParams.get('token') === 订阅TOKEN) {
+                    config_JSON = await 读取config_JSON(env, host, userID);
+                    ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_Fixed_Clash', config_JSON));
+                    
+                    // 通过订阅转换器生成clash配置
+                    const 固定订阅URL = url.protocol + '//' + url.host + '/fixed-sub?token=' + 订阅TOKEN;
+                    const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=clash&url=${encodeURIComponent(固定订阅URL)}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&scv=${config_JSON.跳过证书验证}`;
+                    
+                    try {
+                        const response = await fetch(订阅转换URL, { 
+                            headers: { 
+                                'User-Agent': 'Subconverter for clash edgetunnel(https://github.com/cmliu/edgetunnel)' 
+                            } 
+                        });
+                        
+                        if (response.ok) {
+                            let 订阅内容 = await response.text();
+                            
+                            const responseHeaders = {
+                                "content-type": "application/x-yaml; charset=utf-8",
+                                "Profile-Update-Interval": config_JSON.优选订阅生成.SUBUpdateTime,
+                                "Profile-web-page-url": url.protocol + '//' + url.host + '/admin',
+                                "Cache-Control": "no-store",
+                            };
+                            
+                            if (!UA.toLowerCase().includes('mozilla')) {
+                                responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent('固定订阅-Clash-' + config_JSON.优选订阅生成.SUBNAME + '.yaml')}`;
+                            }
+                            
+                            return new Response(订阅内容, { status: 200, headers: responseHeaders });
+                        } else {
+                            return new Response('订阅转换后端异常：' + response.statusText, { status: response.status });
+                        }
+                    } catch (error) {
+                        return new Response('订阅转换后端异常：' + error.message, { status: 403 });
+                    }
+                }
+                return new Response('无效的订阅TOKEN', { status: 403 });
             } else if (访问路径 === 'sub') {//处理订阅请求
                 const 订阅TOKEN = await MD5MD5(host + userID);
                 if (url.searchParams.get('token') === 订阅TOKEN) {
@@ -933,6 +973,60 @@ function 随机替换通配符(h) {
             s += 字符集[Math.floor(Math.random() * 36)];
         return s;
     });
+}
+
+// 简单的对象转YAML函数（用于Clash配置）
+function objectToYaml(obj, indent = 0) {
+    const spaces = '  '.repeat(indent);
+    let yaml = '';
+    
+    for (const [key, value] of Object.entries(obj)) {
+        if (value === null || value === undefined) continue;
+        
+        // 处理key，如果包含特殊字符需要加引号
+        const needQuoteKey = /[:\-\[\]\{\}\@\#\|\>\<\&\*\!\%]/.test(key) || key.includes(' ');
+        const formattedKey = needQuoteKey ? `"${key}"` : key;
+        
+        if (Array.isArray(value)) {
+            yaml += `${spaces}${formattedKey}:\n`;
+            for (const item of value) {
+                if (typeof item === 'object' && item !== null) {
+                    yaml += `${spaces}  -\n${objectToYaml(item, indent + 2).split('\n').map(line => line ? '  ' + line : '').join('\n')}\n`;
+                } else {
+                    // 字符串值需要处理特殊字符
+                    const needQuoteValue = typeof item === 'string' && (/[:\-\[\]\{\}\@\#\|\>\<\&\*\!\%\'\"]/.test(item) || item.includes(' '));
+                    const formattedValue = needQuoteValue ? `"${item.replace(/"/g, '\\"')}"` : item;
+                    yaml += `${spaces}  - ${formattedValue}\n`;
+                }
+            }
+        } else if (typeof value === 'object' && value !== null) {
+            yaml += `${spaces}${formattedKey}:\n${objectToYaml(value, indent + 1)}`;
+        } else if (typeof value === 'boolean') {
+            yaml += `${spaces}${formattedKey}: ${value}\n`;
+        } else if (typeof value === 'number') {
+            yaml += `${spaces}${formattedKey}: ${value}\n`;
+        } else if (typeof value === 'string') {
+            // 字符串值需要处理特殊字符和引号
+            const needQuote = /[:\-\[\]\{\}\@\#\|\>\<\&\*\!\%]/.test(value) || value.includes(' ') || value.includes("'") || value.includes('"');
+            if (needQuote) {
+                // 如果包含双引号，使用单引号包裹，反之亦然
+                if (value.includes('"') && !value.includes("'")) {
+                    yaml += `${spaces}${formattedKey}: '${value}'\n`;
+                } else if (value.includes("'") && !value.includes('"')) {
+                    yaml += `${spaces}${formattedKey}: "${value}"\n`;
+                } else {
+                    // 都包含时，转义双引号
+                    yaml += `${spaces}${formattedKey}: "${value.replace(/"/g, '\\"')}"\n`;
+                }
+            } else {
+                yaml += `${spaces}${formattedKey}: ${value}\n`;
+            }
+        } else {
+            yaml += `${spaces}${formattedKey}: ${value}\n`;
+        }
+    }
+    
+    return yaml;
 }
 
 function 批量替换域名(内容, host, 每组数量 = 2) {
@@ -1616,6 +1710,17 @@ async function nginx() {
 			</div>
 		</div>
 
+		<div class="form-group">
+			<label>🔥 Clash / Mihomo 订阅 <span class="new-badge">推荐</span></label>
+			<div class="url-display">
+				<input type="text" id="fixed-clash-url" readonly placeholder="加载中...">
+				<button class="btn btn-primary" onclick="copyText('fixed-clash-url')">复制</button>
+			</div>
+			<p style="margin: 8px 0 0 0; font-size: 13px; color: #666;">
+				✓ 适用于 Clash Meta for Android、Mihomo、ClashX 等客户端
+			</p>
+		</div>
+
 		<hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
 
 		<h3 class="section-title">🔧 固定配置信息</h3>
@@ -1667,12 +1772,15 @@ async function nginx() {
 					const baseUrl = window.location.origin;
 					const token = config.优选订阅生成.TOKEN;
 					document.getElementById('fixed-sub-url').value = \`\${baseUrl}/fixed-sub?token=\${token}\`;
+					document.getElementById('fixed-clash-url').value = \`\${baseUrl}/fixed-clash?token=\${token}\`;
 				} else {
 					document.getElementById('fixed-sub-url').value = '请先设置管理密码并配置';
+					document.getElementById('fixed-clash-url').value = '请先设置管理密码并配置';
 				}
 			} catch (error) {
 				console.error('加载配置失败:', error);
 				document.getElementById('fixed-sub-url').value = '加载失败';
+				document.getElementById('fixed-clash-url').value = '加载失败';
 			}
 		}
 
