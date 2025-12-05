@@ -6,6 +6,15 @@ const Pages静态页面 = 'https://edt-pages.github.io';
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
+        // 兜底分支：根路径和 favicon.ico（放在 url 定义之后）
+        if (url.pathname === '/' || url.pathname === '/favicon.ico') {
+            if (url.pathname === '/favicon.ico') {
+                // 返回空 favicon，避免浏览器报错
+                return new Response('', { status: 204, headers: { 'Content-Type': 'image/x-icon' } });
+            }
+            // 返回 nginx 欢迎页
+            return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+        }
         const UA = request.headers.get('User-Agent') || 'null';
         const upgradeHeader = request.headers.get('Upgrade');
         const 管理员密码 = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY;
@@ -23,8 +32,30 @@ export default {
         if (env.GO2SOCKS5) SOCKS5白名单 = await 整理成数组(env.GO2SOCKS5);
         if (!upgradeHeader || upgradeHeader !== 'websocket') {
             if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
-            if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }); });
-            if (!env.KV) return fetch(Pages静态页面 + '/noKV').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }); });
+            if (!管理员密码) {
+                try {
+                    const r = await fetch(Pages静态页面 + '/noADMIN');
+                    const headers = new Headers(r.headers);
+                    headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+                    headers.set('Pragma', 'no-cache');
+                    headers.set('Expires', '0');
+                    return new Response(r.body, { status: 404, statusText: r.statusText, headers });
+                } catch (error) {
+                    return new Response('No admin password set', { status: 404 });
+                }
+            }
+            if (!env.KV) {
+                try {
+                    const r = await fetch(Pages静态页面 + '/noKV');
+                    const headers = new Headers(r.headers);
+                    headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+                    headers.set('Pragma', 'no-cache');
+                    headers.set('Expires', '0');
+                    return new Response(r.body, { status: 404, statusText: r.statusText, headers });
+                } catch (error) {
+                    return new Response('KV not available', { status: 404 });
+                }
+            }
             const 访问路径 = url.pathname.slice(1).toLowerCase();
             const 区分大小写访问路径 = url.pathname.slice(1);
             if (访问路径 === 加密秘钥 && 加密秘钥 !== '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改') {//快速订阅
@@ -46,7 +77,11 @@ export default {
                         return 响应;
                     }
                 }
-                return fetch(Pages静态页面 + '/login');
+                try {
+                    return await fetch(Pages静态页面 + '/login');
+                } catch (error) {
+                    return new Response('Login page not available', { status: 500 });
+                }
             } else if (访问路径 == 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
                 const cookies = request.headers.get('Cookie') || '';
                 const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
@@ -194,7 +229,11 @@ export default {
                 }
 
                 ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-                return fetch(Pages静态页面 + '/admin');
+                try {
+                    return await fetch(Pages静态页面 + '/admin');
+                } catch (error) {
+                    return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+                }
             } else if (访问路径 === 'logout') {//清除cookie并跳转到登录页面
                 const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
                 响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
@@ -444,30 +483,45 @@ export default {
                 }
                 return new Response('无效的订阅TOKEN', { status: 403 });
             } else if (访问路径 === 'locations') {
-                return fetch(new Request('https://speed.cloudflare.com/locations'));
+                // 拉取 locations 数据并保证为数组
+                try {
+                    const resp = await fetch('https://speed.cloudflare.com/locations');
+                    let data = await resp.text();
+                    let locationsData;
+                    try {
+                        locationsData = JSON.parse(data);
+                    } catch {
+                        // 若不是JSON，尝试按行分割
+                        locationsData = data.split('\n').map(l => l.trim()).filter(l => l);
+                    }
+                    if (!Array.isArray(locationsData)) locationsData = [];
+                    return new Response(JSON.stringify(locationsData), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                } catch (error) {
+                    return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                }
+            } else if (管理员密码) {// ws代理
+                await 反代参数获取(request);
+                return await 处理WS请求(request, userID);
+            } else {
+                let 伪装页URL = env.URL || 'nginx';
+                if (伪装页URL && 伪装页URL !== 'nginx' && 伪装页URL !== '1101') {
+                    伪装页URL = 伪装页URL.trim().replace(/\/$/, '');
+                    if (!伪装页URL.match(/^https?:\/\//i)) 伪装页URL = 'https://' + 伪装页URL;
+                    if (伪装页URL.toLowerCase().startsWith('http://')) 伪装页URL = 'https://' + 伪装页URL.substring(7);
+                    try { const u = new URL(伪装页URL); 伪装页URL = u.protocol + '//' + u.host; } catch (e) { 伪装页URL = 'nginx'; }
+                }
+                if (伪装页URL === '1101') return new Response(await html1101(url.host, 访问IP), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+                try {
+                    const 反代URL = new URL(伪装页URL), 新请求头 = new Headers(request.headers);
+                    新请求头.set('Host', 反代URL.host);
+                    if (新请求头.has('Referer')) { const u = new URL(新请求头.get('Referer')); 新请求头.set('Referer', 反代URL.protocol + '//' + 反代URL.host + u.pathname + u.search); }
+                    if (新请求头.has('Origin')) 新请求头.set('Origin', 反代URL.protocol + '//' + 反代URL.host);
+                    if (!新请求头.has('User-Agent') && UA && UA !== 'null') 新请求头.set('User-Agent', UA);
+                    return fetch(new Request(反代URL.protocol + 反代URL.host + url.pathname + url.search, { method: request.method, headers: 新请求头, body: request.body, cf: request.cf }));
+                } catch (error) { }
+                return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
             }
-        } else if (管理员密码) {// ws代理
-            await 反代参数获取(request);
-            return await 处理WS请求(request, userID);
         }
-
-        let 伪装页URL = env.URL || 'nginx';
-        if (伪装页URL && 伪装页URL !== 'nginx' && 伪装页URL !== '1101') {
-            伪装页URL = 伪装页URL.trim().replace(/\/$/, '');
-            if (!伪装页URL.match(/^https?:\/\//i)) 伪装页URL = 'https://' + 伪装页URL;
-            if (伪装页URL.toLowerCase().startsWith('http://')) 伪装页URL = 'https://' + 伪装页URL.substring(7);
-            try { const u = new URL(伪装页URL); 伪装页URL = u.protocol + '//' + u.host; } catch (e) { 伪装页URL = 'nginx'; }
-        }
-        if (伪装页URL === '1101') return new Response(await html1101(url.host, 访问IP), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
-        try {
-            const 反代URL = new URL(伪装页URL), 新请求头 = new Headers(request.headers);
-            新请求头.set('Host', 反代URL.host);
-            if (新请求头.has('Referer')) { const u = new URL(新请求头.get('Referer')); 新请求头.set('Referer', 反代URL.protocol + '//' + 反代URL.host + u.pathname + u.search); }
-            if (新请求头.has('Origin')) 新请求头.set('Origin', 反代URL.protocol + '//' + 反代URL.host);
-            if (!新请求头.has('User-Agent') && UA && UA !== 'null') 新请求头.set('User-Agent', UA);
-            return fetch(new Request(反代URL.protocol + 反代URL.host + url.pathname + url.search, { method: request.method, headers: 新请求头, body: request.body, cf: request.cf }));
-        } catch (error) { }
-        return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
     }
 };
 ///////////////////////////////////////////////////////////////////////WS传输数据///////////////////////////////////////////////
