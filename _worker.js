@@ -1048,7 +1048,7 @@ async function 读取config_JSON(env, hostname, userID, 重置配置 = false) {
         协议类型: "v" + "le" + "ss",
         传输协议: "ws",
         跳过证书验证: true,
-        启用0RTT: true,
+        启用0RTT: false,
         TLS分片: null,
         随机路径: false,
         优选订阅生成: {
@@ -1066,7 +1066,7 @@ async function 读取config_JSON(env, hostname, userID, 重置配置 = false) {
         固定配置信息: null,
         订阅转换配置: {
             SUBAPI: "https://SUBAPI.cmliussss.net",
-            SUBCONFIG: "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/refs/heads/master/Clash/config/ACL4SSR_Online_Mini_MultiMode.ini",
+            SUBCONFIG: "https://raw.githubusercontent.com/cmliu/ACL4SSR/refs/heads/main/Clash/config/ACL4SSR_Online_Mini_MultiMode_CF.ini",
             SUBEMOJI: false,
         },
         反代: {
