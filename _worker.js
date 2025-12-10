@@ -238,14 +238,158 @@ export default {
                 const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
                 响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
                 return 响应;
+            } else if (访问路径 === 'public/token') {//获取token的公开端点
+                const 订阅TOKEN = await MD5MD5(host + userID);
+                return new Response(JSON.stringify({ token: 订阅TOKEN }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+            } else if (访问路径 === 'public/config.json' || 访问路径 === 'public/fixed-config.txt') {//公开端点，使用token验证
+                const 订阅TOKEN = await MD5MD5(host + userID);
+                const requestToken = url.searchParams.get('token');
+                if (requestToken !== 订阅TOKEN) {
+                    return new Response(JSON.stringify({ error: 'Token验证失败' }), { status: 401, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                }
+                config_JSON = await 读取config_JSON(env, host, userID);
+                
+                if (访问路径 === 'public/config.json') {
+                    if (request.method === 'POST') {
+                        // 保存配置
+                        try {
+                            const newConfig = await request.json();
+                            if (!newConfig.UUID || !newConfig.HOST) {
+                                return new Response(JSON.stringify({ error: '配置不完整' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                            }
+                            await env.KV.put('config.json', JSON.stringify(newConfig, null, 2));
+                            ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Save_Config_Public', config_JSON));
+                            return new Response(JSON.stringify({ success: true, message: '配置已保存' }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        } catch (error) {
+                            console.error('保存配置失败:', error);
+                            return new Response(JSON.stringify({ error: '保存配置失败: ' + error.message }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        }
+                    } else {
+                        // 读取配置
+                        return new Response(JSON.stringify(config_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    }
+                } else if (访问路径 === 'public/fixed-config.txt') {
+                    // 兼容旧版本：读取单个配置
+                    if (request.method === 'GET') {
+                        const 固定配置 = await env.KV.get('fixed-config.txt') || '';
+                        return new Response(固定配置, { status: 200, headers: { 'Content-Type': 'text/plain;charset=utf-8' } });
+                    } else if (request.method === 'POST') {
+                        // 兼容旧版本：保存单个配置
+                        try {
+                            const fixedConfig = await request.text();
+                            await env.KV.put('fixed-config.txt', fixedConfig);
+                            ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Save_Fixed_Config_Public', config_JSON));
+                            return new Response(JSON.stringify({ success: true, message: '固定配置信息已保存' }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        } catch (error) {
+                            console.error('保存固定配置信息失败:', error);
+                            return new Response(JSON.stringify({ error: '保存固定配置信息失败: ' + error.message }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        }
+                    }
+                }
+            } else if (访问路径 === 'public/fixed-configs.json') {
+                    // 新的多配置端点
+                    const 订阅TOKEN = await MD5MD5(host + userID);
+                    const requestToken = url.searchParams.get('token');
+                    if (requestToken !== 订阅TOKEN) {
+                        return new Response(JSON.stringify({ error: 'Token验证失败' }), { status: 401, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    }
+                    
+                    if (request.method === 'POST') {
+                        // 保存多个固定配置
+                        try {
+                            // 解析请求体
+                            let configsData;
+                            try {
+                                configsData = await request.json();
+                            } catch (parseError) {
+                                console.error('解析请求体失败:', parseError);
+                                return new Response(JSON.stringify({ error: '请求体格式错误，无法解析JSON' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                            }
+                            
+                            if (!Array.isArray(configsData)) {
+                                return new Response(JSON.stringify({ error: '配置数据格式错误，必须是数组' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                            }
+                            
+                            // 确保每个配置都有token
+                            const 带token的配置 = configsData.map(c => ({
+                                id: c.id || 'config-' + Date.now() + '-' + Math.random(),
+                                config: c.config || '',
+                                token: c.token || 订阅TOKEN
+                            }));
+                            
+                            // 保存配置到KV
+                            try {
+                                await env.KV.put('fixed-configs.json', JSON.stringify(带token的配置, null, 2));
+                            } catch (kvError) {
+                                console.error('KV保存失败:', kvError);
+                                return new Response(JSON.stringify({ error: '保存到KV失败: ' + (kvError.message || String(kvError)) }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                            }
+                            
+                            // 日志记录（完全异步，不阻塞响应）
+                            (async () => {
+                                try {
+                                    if (!config_JSON) {
+                                        config_JSON = await 读取config_JSON(env, host, userID);
+                                    }
+                                    if (config_JSON && 访问IP) {
+                                        await 请求日志记录(env, request, 访问IP, 'Save_Fixed_Configs_Public', config_JSON);
+                                    }
+                                } catch (logError) {
+                                    console.error('日志记录失败，但不影响保存:', logError);
+                                }
+                            })();
+                            
+                            return new Response(JSON.stringify({ success: true, message: '固定配置信息已保存' }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        } catch (error) {
+                            console.error('保存固定配置信息失败:', error);
+                            console.error('错误堆栈:', error.stack);
+                            return new Response(JSON.stringify({ error: '保存固定配置信息失败: ' + (error.message || String(error)) }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        }
+                    } else {
+                        // 读取多个固定配置
+                        let 配置列表 = await env.KV.get('fixed-configs.json');
+                        if (!配置列表) {
+                            // 兼容旧版本：如果新格式不存在，尝试读取旧格式
+                            const 旧配置 = await env.KV.get('fixed-config.txt') || '';
+                            if (旧配置) {
+                                配置列表 = JSON.stringify([{ id: Date.now().toString(), config: 旧配置, token: 订阅TOKEN }], null, 2);
+                            } else {
+                                配置列表 = '[]';
+                            }
+                        }
+                        return new Response(配置列表, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    }
             } else if (访问路径 === 'fixed-sub') {//处理固定订阅请求
                 const 订阅TOKEN = await MD5MD5(host + userID);
-                if (url.searchParams.get('token') === 订阅TOKEN) {
+                const requestToken = url.searchParams.get('token');
+                const configId = url.searchParams.get('id');
+                
+                if (requestToken === 订阅TOKEN) {
                     config_JSON = await 读取config_JSON(env, host, userID);
                     ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_Fixed_SUB', config_JSON));
                     
-                    // 获取固定配置信息
-                    const 固定配置模板 = await env.KV.get('fixed-config.txt');
+                    // 获取固定配置信息（支持多配置）
+                    let 固定配置模板 = null;
+                    
+                    if (configId) {
+                        // 使用新格式：从配置列表中查找指定id的配置
+                        const 配置列表JSON = await env.KV.get('fixed-configs.json');
+                        if (配置列表JSON) {
+                            try {
+                                const 配置列表 = JSON.parse(配置列表JSON);
+                                const 指定配置 = 配置列表.find(c => c.id === configId);
+                                if (指定配置 && 指定配置.token === requestToken) {
+                                    固定配置模板 = 指定配置.config;
+                                }
+                            } catch (e) {
+                                console.error('解析配置列表失败:', e);
+                            }
+                        }
+                    } else {
+                        // 兼容旧格式：读取单个配置
+                        固定配置模板 = await env.KV.get('fixed-config.txt');
+                    }
+                    
                     if (!固定配置模板) {
                         return new Response('固定配置信息未设置', { status: 404 });
                     }
@@ -329,12 +473,17 @@ export default {
                 return new Response('无效的订阅TOKEN', { status: 403 });
             } else if (访问路径 === 'fixed-clash') {//处理固定订阅Clash请求
                 const 订阅TOKEN = await MD5MD5(host + userID);
-                if (url.searchParams.get('token') === 订阅TOKEN) {
+                const requestToken = url.searchParams.get('token');
+                const configId = url.searchParams.get('id');
+                
+                if (requestToken === 订阅TOKEN) {
                     config_JSON = await 读取config_JSON(env, host, userID);
                     ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_Fixed_Clash', config_JSON));
                     
                     // 通过订阅转换器生成clash配置
-                    const 固定订阅URL = url.protocol + '//' + url.host + '/fixed-sub?token=' + 订阅TOKEN;
+                    const 固定订阅URL = configId 
+                        ? url.protocol + '//' + url.host + '/fixed-sub?id=' + configId + '&token=' + 订阅TOKEN
+                        : url.protocol + '//' + url.host + '/fixed-sub?token=' + 订阅TOKEN;
                     const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=clash&url=${encodeURIComponent(固定订阅URL)}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&scv=${config_JSON.跳过证书验证}`;
                     
                     try {
@@ -944,7 +1093,7 @@ async function 请求日志记录(env, request, 访问IP, 请求类型 = "Get_SU
                     日志数组.push(日志内容);
                     while (JSON.stringify(日志数组, null, 2).length > KV容量限制 * 1024 * 1024 && 日志数组.length > 0) 日志数组.shift();
                 }
-                if (config_JSON.TG.启用) {
+                if (config_JSON && config_JSON.TG && config_JSON.TG.启用) {
                     try {
                         const TG_TXT = await env.KV.get('tg.json');
                         const TG_JSON = JSON.parse(TG_TXT);
@@ -959,11 +1108,16 @@ async function 请求日志记录(env, request, 访问IP, 请求类型 = "Get_SU
 
 async function sendMessage(BotToken, ChatID, 日志内容, config_JSON) {
     if (!BotToken || !ChatID) return;
+    if (!config_JSON) return;
 
     try {
         const 请求时间 = new Date(日志内容.TIME).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
         const 请求URL = new URL(日志内容.URL);
-        const msg = `<b>#${config_JSON.优选订阅生成.SUBNAME} 日志通知</b>\n\n` +
+        const subName = config_JSON.优选订阅生成?.SUBNAME || 'EdgeTunnel';
+        const usageInfo = config_JSON.CF?.Usage?.success 
+            ? `📊 <b>请求用量：</b>${config_JSON.CF.Usage.total}/100000 <b>${((config_JSON.CF.Usage.total / 100000) * 100).toFixed(2)}%</b>\n`
+            : '';
+        const msg = `<b>#${subName} 日志通知</b>\n\n` +
             `📌 <b>类型：</b>#${日志内容.TYPE}\n` +
             `🌐 <b>IP：</b><code>${日志内容.IP}</code>\n` +
             `📍 <b>位置：</b>${日志内容.CC}\n` +
@@ -972,7 +1126,7 @@ async function sendMessage(BotToken, ChatID, 日志内容, config_JSON) {
             `🔍 <b>路径：</b><code>${请求URL.pathname + 请求URL.search}</code>\n` +
             `🤖 <b>UA：</b><code>${日志内容.UA}</code>\n` +
             `📅 <b>时间：</b>${请求时间}\n` +
-            `${config_JSON.CF.Usage.success ? `📊 <b>请求用量：</b>${config_JSON.CF.Usage.total}/100000 <b>${((config_JSON.CF.Usage.total / 100000) * 100).toFixed(2)}%</b>\n` : ''}`;
+            usageInfo;
 
         const url = `https://api.telegram.org/bot${BotToken}/sendMessage?chat_id=${ChatID}&parse_mode=HTML&text=${encodeURIComponent(msg)}`;
         return fetch(url, {
@@ -1737,6 +1891,56 @@ async function nginx() {
 			font-size: 12px;
 			margin-left: 8px;
 		}
+		.config-item {
+			background: #f5f5f5;
+			border: 1px solid #ddd;
+			border-radius: 8px;
+			padding: 15px;
+			margin-bottom: 15px;
+			position: relative;
+		}
+		.config-item-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			margin-bottom: 10px;
+		}
+		.config-item-title {
+			font-weight: bold;
+			color: #333;
+			font-size: 14px;
+		}
+		.config-item-actions {
+			display: flex;
+			gap: 5px;
+		}
+		.btn-delete {
+			background: #f44336;
+			color: white;
+			padding: 5px 10px;
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 12px;
+		}
+		.btn-delete:hover {
+			background: #d32f2f;
+		}
+		.config-item textarea {
+			width: 100%;
+			margin-bottom: 10px;
+		}
+		.config-urls {
+			margin-top: 10px;
+		}
+		.config-url-item {
+			margin-bottom: 8px;
+		}
+		.config-url-item label {
+			font-size: 12px;
+			color: #666;
+			margin-bottom: 3px;
+		}
 	</style>
 	</head>
 	<body>
@@ -1753,26 +1957,8 @@ async function nginx() {
 		
 		<div class="info-box">
 			<p><strong>💡 提示：</strong>这是一个新功能，可以使用固定的节点配置模板，自动替换IP生成多个节点订阅。</p>
+			<p>可以使用 ➕ 按钮添加多个配置模板，每个模板都会生成独立的订阅连接。</p>
 			<p>需要使用其他功能？请访问 <a href="/admin" class="admin-link">管理后台</a></p>
-		</div>
-
-		<div class="form-group">
-			<label>📡 固定订阅连接</label>
-			<div class="url-display">
-				<input type="text" id="fixed-sub-url" readonly placeholder="加载中...">
-				<button class="btn btn-primary" onclick="copyText('fixed-sub-url')">复制</button>
-			</div>
-		</div>
-
-		<div class="form-group">
-			<label>🔥 Clash / Mihomo 订阅 <span class="new-badge">推荐</span></label>
-			<div class="url-display">
-				<input type="text" id="fixed-clash-url" readonly placeholder="加载中...">
-				<button class="btn btn-primary" onclick="copyText('fixed-clash-url')">复制</button>
-			</div>
-			<p style="margin: 8px 0 0 0; font-size: 13px; color: #666;">
-				✓ 适用于 Clash Meta for Android、Mihomo、ClashX 等客户端
-			</p>
 		</div>
 
 		<hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
@@ -1790,11 +1976,14 @@ async function nginx() {
 		
 		<div class="form-group">
 			<label>固定配置模板 (vless://...)</label>
-			<textarea id="fixed-config" placeholder="示例：vless://uuid@ip:port?参数#备注"></textarea>
+			<div id="fixed-configs-container">
+				<!-- 配置项将通过JavaScript动态添加 -->
+			</div>
+			<button class="btn btn-primary" onclick="addFixedConfig()" style="margin-top: 10px;">➕ 添加配置模板</button>
 		</div>
 		
-		<button class="btn btn-success" onclick="saveFixedConfig()">💾 保存固定配置</button>
-		<button class="btn btn-secondary" onclick="loadFixedConfig()">🔄 刷新</button>
+		<button class="btn btn-success" onclick="saveFixedConfigs()">💾 保存所有配置</button>
+		<button class="btn btn-secondary" onclick="loadFixedConfigs()">🔄 刷新</button>
 
 		<hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
 
@@ -1813,66 +2002,363 @@ async function nginx() {
 
 	<script>
 		let config = {};
+		let token = null;
+		
+		// 获取 token
+		async function getToken() {
+			if (token) return token;
+			try {
+				const response = await fetch('/public/token');
+				if (response.ok) {
+					const data = await response.json();
+					token = data.token;
+					return token;
+				}
+			} catch (error) {
+				console.error('获取token失败:', error);
+			}
+			return null;
+		}
+		
+		let configs = []; // 存储所有配置模板
+		let configCounter = 0; // 配置计数器，用于生成唯一ID
+		
 		window.onload = async function() { 
 			await loadConfig(); 
-			await loadFixedConfig(); 
+			await loadFixedConfigs(); 
 		};
 
 		async function loadConfig() {
 			try {
+				// 先尝试使用公开端点（不需要登录）
+				const currentToken = await getToken();
+				if (currentToken) {
+					const response = await fetch(\`/public/config.json?token=\${currentToken}\`);
+					if (response.ok) {
+						config = await response.json();
+						// 更新所有配置的token和URL
+						updateAllConfigTokens();
+						return;
+					}
+				}
+				
+				// 如果公开端点失败，尝试使用管理端点（需要登录）
 				const response = await fetch('/admin/config.json');
 				if (response.ok) {
-					config = await response.json();
-					const baseUrl = window.location.origin;
-					const token = config.优选订阅生成.TOKEN;
-					document.getElementById('fixed-sub-url').value = \`\${baseUrl}/fixed-sub?token=\${token}\`;
-					document.getElementById('fixed-clash-url').value = \`\${baseUrl}/fixed-clash?token=\${token}\`;
-				} else {
-					document.getElementById('fixed-sub-url').value = '请先设置管理密码并配置';
-					document.getElementById('fixed-clash-url').value = '请先设置管理密码并配置';
+					const contentType = response.headers.get('content-type') || '';
+					if (contentType.includes('application/json')) {
+						config = await response.json();
+						// 更新所有配置的token和URL
+						updateAllConfigTokens();
+					}
 				}
 			} catch (error) {
 				console.error('加载配置失败:', error);
-				document.getElementById('fixed-sub-url').value = '加载失败';
-				document.getElementById('fixed-clash-url').value = '加载失败';
 			}
 		}
 
-		async function loadFixedConfig() {
+		// 更新所有配置的token和URL
+		function updateAllConfigTokens() {
+			if (!config || !config.优选订阅生成) return;
+			const configToken = config.优选订阅生成.TOKEN;
+			configs.forEach(configItem => {
+				configItem.token = configToken;
+				updateConfigUrls(configItem.id);
+			});
+		}
+
+		// 添加配置模板
+		function addFixedConfig() {
+			configCounter++;
+			const configId = 'config-' + Date.now() + '-' + configCounter;
+			const baseUrl = window.location.origin;
+			const configToken = config && config.优选订阅生成 ? config.优选订阅生成.TOKEN : '';
+			
+			// 获取第一个配置的模板（如果有的话）
+			let templateConfig = '';
+			if (configs.length > 0 && configs[0].config) {
+				templateConfig = configs[0].config;
+			}
+			
+			const configItem = {
+				id: configId,
+				config: templateConfig,
+				token: configToken
+			};
+			
+			configs.push(configItem);
+			renderConfigs();
+		}
+
+		// 删除配置模板
+		function removeFixedConfig(configId) {
+			configs = configs.filter(c => c.id !== configId);
+			renderConfigs();
+		}
+
+		// 更新配置内容
+		function updateConfig(configId, configText) {
+			const configItem = configs.find(c => c.id === configId);
+			if (configItem) {
+				configItem.config = configText;
+				updateConfigUrls(configId);
+			}
+		}
+
+		// 更新配置的订阅连接
+		function updateConfigUrls(configId) {
+			const configItem = configs.find(c => c.id === configId);
+			if (!configItem) return;
+			
+			const baseUrl = window.location.origin;
+			const configToken = configItem.token || (config && config.优选订阅生成 ? config.优选订阅生成.TOKEN : '');
+			
+			const subUrl = \`\${baseUrl}/fixed-sub?id=\${configId}&token=\${configToken}\`;
+			const clashUrl = \`\${baseUrl}/fixed-clash?id=\${configId}&token=\${configToken}\`;
+			
+			const subInput = document.getElementById(\`sub-url-\${configId}\`);
+			const clashInput = document.getElementById(\`clash-url-\${configId}\`);
+			
+			if (subInput) subInput.value = subUrl;
+			if (clashInput) clashInput.value = clashUrl;
+		}
+
+		// 渲染所有配置
+		function renderConfigs() {
+			const container = document.getElementById('fixed-configs-container');
+			if (!container) return;
+			
+			container.innerHTML = '';
+			
+			if (configs.length === 0) {
+				// 如果没有配置，添加一个默认配置
+				addFixedConfig();
+				return;
+			}
+			
+			configs.forEach((configItem, index) => {
+				const configDiv = document.createElement('div');
+				configDiv.className = 'config-item';
+				configDiv.innerHTML = \`
+					<div class="config-item-header">
+						<span class="config-item-title">配置模板 \${index + 1}</span>
+						<div class="config-item-actions">
+							<button class="btn-delete" onclick="removeFixedConfig('\${configItem.id}')">🗑️ 删除</button>
+						</div>
+					</div>
+					<textarea 
+						id="config-text-\${configItem.id}" 
+						placeholder="示例：vless://uuid@ip:port?参数#备注"
+						oninput="updateConfig('\${configItem.id}', this.value)"
+					>\${configItem.config || ''}</textarea>
+					<div class="config-urls">
+						<div class="config-url-item">
+							<label>📡 固定订阅连接</label>
+							<div class="url-display">
+								<input type="text" id="sub-url-\${configItem.id}" readonly placeholder="加载中...">
+								<button class="btn btn-primary" onclick="copyText('sub-url-\${configItem.id}')">复制</button>
+							</div>
+						</div>
+						<div class="config-url-item">
+							<label>🔥 Clash / Mihomo 订阅</label>
+							<div class="url-display">
+								<input type="text" id="clash-url-\${configItem.id}" readonly placeholder="加载中...">
+								<button class="btn btn-primary" onclick="copyText('clash-url-\${configItem.id}')">复制</button>
+							</div>
+						</div>
+					</div>
+				\`;
+				container.appendChild(configDiv);
+				
+				// 更新订阅连接
+				updateConfigUrls(configItem.id);
+			});
+		}
+
+		// 加载所有配置
+		async function loadFixedConfigs() {
 			try {
+				// 先尝试使用公开端点（不需要登录）
+				const currentToken = await getToken();
+				if (currentToken) {
+					const response = await fetch(\`/public/fixed-configs.json?token=\${currentToken}\`);
+					if (response.ok) {
+						const contentType = response.headers.get('content-type') || '';
+						if (contentType.includes('application/json')) {
+							const data = await response.json();
+							console.log('加载的配置数据:', data);
+							if (Array.isArray(data)) {
+								if (data.length > 0) {
+									configs = data;
+									// 确保每个配置都有token和id
+									configs.forEach((c, index) => {
+										if (!c.token) c.token = currentToken;
+										if (!c.id) c.id = 'config-' + Date.now() + '-' + index;
+									});
+									console.log('处理后的配置数量:', configs.length);
+									renderConfigs();
+									return;
+								} else {
+									// 数组为空，添加一个默认配置
+									console.log('配置数组为空，添加默认配置');
+									addFixedConfig();
+									return;
+								}
+							}
+						}
+					}
+					
+					// 如果新格式不存在，尝试读取旧格式
+					const oldResponse = await fetch(\`/public/fixed-config.txt?token=\${currentToken}\`);
+					if (oldResponse.ok) {
+						const contentType = oldResponse.headers.get('content-type') || '';
+						if (contentType.includes('text/plain')) {
+							const text = await oldResponse.text();
+							if (text && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html') && text.trim().length > 0) {
+								configs = [{
+									id: 'config-' + Date.now(),
+									config: text.trim(),
+									token: currentToken
+								}];
+								console.log('从旧格式加载配置');
+								renderConfigs();
+								return;
+							}
+						}
+					}
+				}
+				
+				// 如果公开端点失败，尝试使用管理端点（需要登录）
 				const response = await fetch('/admin/fixed-config.txt');
 				if (response.ok) {
-					const text = await response.text();
-					document.getElementById('fixed-config').value = text;
+					const contentType = response.headers.get('content-type') || '';
+					if (contentType.includes('text/plain')) {
+						const text = await response.text();
+						if (text && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html') && text.trim().length > 0) {
+							configs = [{
+								id: 'config-' + Date.now(),
+								config: text.trim(),
+								token: config && config.优选订阅生成 ? config.优选订阅生成.TOKEN : ''
+							}];
+							console.log('从管理端点加载配置');
+							renderConfigs();
+							return;
+						}
+					}
+				}
+				
+				// 如果所有加载方式都失败，添加一个默认配置
+				if (configs.length === 0) {
+					console.log('所有加载方式都失败，添加默认配置');
+					addFixedConfig();
 				}
 			} catch (error) {
 				console.error('加载固定配置失败:', error);
+				// 如果加载失败，至少显示一个空配置
+				if (configs.length === 0) {
+					addFixedConfig();
+				}
 			}
 		}
 
-		async function saveFixedConfig() {
-			const configText = document.getElementById('fixed-config').value.trim();
-			if (!configText) {
-				showError('fixed-config', '请输入固定配置信息');
+		// 保存所有配置
+		async function saveFixedConfigs() {
+			// 验证所有配置（只验证有内容的配置）
+			for (let i = 0; i < configs.length; i++) {
+				const configItem = configs[i];
+				const configText = (configItem.config || '').trim();
+				if (configText && !configText.startsWith('vless://')) {
+					showError('fixed-config', \`配置模板 \${i + 1} 格式错误，必须是 vless:// 开头的链接\`);
+					return;
+				}
+			}
+			
+			// 检查是否至少有一个有效配置
+			const hasValidConfig = configs.some(c => (c.config || '').trim().length > 0);
+			if (!hasValidConfig) {
+				showError('fixed-config', '请至少输入一个有效的配置模板');
 				return;
 			}
-			if (!configText.startsWith('vless://')) {
-				showError('fixed-config', '配置格式错误，必须是 vless:// 开头的链接');
-				return;
-			}
+			
 			try {
-				const response = await fetch('/admin/fixed-config.txt', {
-					method: 'POST',
-					body: configText
-				});
-				if (response.ok) {
-					showSuccess('fixed-config', '✅ 固定配置保存成功！');
+				// 先尝试使用公开端点（不需要登录）
+				const currentToken = await getToken();
+				if (currentToken) {
+					// 保存所有配置（包括空配置），确保每个配置都有token和id
+					const configsToSave = configs.map((c, index) => ({
+						id: c.id || 'config-' + Date.now() + '-' + index,
+						config: (c.config || '').trim(),
+						token: c.token || currentToken
+					}));
+					
+					console.log('保存配置数量:', configsToSave.length);
+					console.log('配置数据:', configsToSave);
+					
+					const response = await fetch(\`/public/fixed-configs.json?token=\${currentToken}\`, {
+						method: 'POST',
+						headers: {
+							'Content-Type': 'application/json'
+						},
+						body: JSON.stringify(configsToSave)
+					});
+					
+					if (response.ok) {
+						const result = await response.json();
+						const savedCount = configsToSave.filter(c => c.config.length > 0).length;
+						showSuccess('fixed-config', \`✅ 成功保存 \${configsToSave.length} 个配置模板（\${savedCount} 个有效配置）！\`);
+						// 更新本地配置列表，确保ID一致
+						configs = configsToSave.map((c, index) => ({
+							...c,
+							id: c.id || configs[index]?.id || 'config-' + Date.now() + '-' + index
+						}));
+						renderConfigs();
+						return;
+					} else {
+						const contentType = response.headers.get('content-type') || '';
+						if (contentType.includes('application/json')) {
+							const error = await response.json();
+							console.error('保存失败:', error);
+							showError('fixed-config', '保存失败: ' + (error.error || '未知错误'));
+							return;
+						} else {
+							const text = await response.text();
+							console.error('保存失败，响应:', text);
+							showError('fixed-config', '保存失败: 服务器返回错误');
+							return;
+						}
+					}
 				} else {
-					const error = await response.json();
-					showError('fixed-config', '保存失败: ' + (error.error || '未知错误'));
+					showError('fixed-config', '无法获取token，请刷新页面重试');
+					return;
+				}
+				
+				// 如果公开端点失败，尝试使用管理端点（需要登录）
+				// 注意：管理端点目前只支持单个配置，这里保存第一个有效配置作为兼容
+				const firstValidConfig = configs.find(c => (c.config || '').trim().length > 0);
+				if (firstValidConfig) {
+					const response = await fetch('/admin/fixed-config.txt', {
+						method: 'POST',
+						body: firstValidConfig.config.trim()
+					});
+					if (response.ok) {
+						showSuccess('fixed-config', '✅ 配置保存成功！（仅保存了第一个有效配置）');
+					} else {
+						const contentType = response.headers.get('content-type') || '';
+						if (contentType.includes('application/json')) {
+							const error = await response.json();
+							showError('fixed-config', '保存失败: ' + (error.error || '未知错误'));
+						} else {
+							showError('fixed-config', '保存失败: 请先登录管理后台');
+						}
+					}
 				}
 			} catch (error) {
-				showError('fixed-config', '保存失败: ' + error.message);
+				console.error('保存配置异常:', error);
+				if (error.message && error.message.includes('Unexpected token')) {
+					showError('fixed-config', '保存失败: 请先登录管理后台');
+				} else {
+					showError('fixed-config', '保存失败: ' + error.message);
+				}
 			}
 		}
 
