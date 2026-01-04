@@ -190,6 +190,111 @@ export default {
                     const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
                     响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
                     return 响应;
+                } else if (访问路径 === 'public/token') {//获取token的公开端点
+                    const 订阅TOKEN = await MD5MD5(host + userID);
+                    return new Response(JSON.stringify({ token: 订阅TOKEN }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                } else if (访问路径 === 'public/config.json') {//公开端点，使用token验证
+                    const 订阅TOKEN = await MD5MD5(host + userID);
+                    const requestToken = url.searchParams.get('token');
+                    if (requestToken !== 订阅TOKEN) {
+                        return new Response(JSON.stringify({ error: 'Token验证失败' }), { status: 401, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    }
+                    config_JSON = await 读取config_JSON(env, host, userID, env.PATH);
+                    return new Response(JSON.stringify(config_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                } else if (访问路径 === 'public/fixed-configs.json') {//多配置端点
+                    const 订阅TOKEN = await MD5MD5(host + userID);
+                    const requestToken = url.searchParams.get('token');
+                    if (requestToken !== 订阅TOKEN) {
+                        return new Response(JSON.stringify({ error: 'Token验证失败' }), { status: 401, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    }
+                    if (request.method === 'POST') {
+                        try {
+                            const configsData = await request.json();
+                            if (!Array.isArray(configsData)) {
+                                return new Response(JSON.stringify({ error: '配置数据格式错误，必须是数组' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                            }
+                            const 带token的配置 = configsData.map(c => ({
+                                id: c.id || 'config-' + Date.now() + '-' + Math.random(),
+                                config: c.config || '',
+                                token: c.token || 订阅TOKEN
+                            }));
+                            await env.KV.put('fixed-configs.json', JSON.stringify(带token的配置, null, 2));
+                            return new Response(JSON.stringify({ success: true, message: '固定配置信息已保存' }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        } catch (error) {
+                            return new Response(JSON.stringify({ error: '保存固定配置信息失败: ' + error.message }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        }
+                    } else {
+                        let 配置列表 = await env.KV.get('fixed-configs.json');
+                        if (!配置列表) {
+                            配置列表 = '[]';
+                        }
+                        return new Response(配置列表, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    }
+                } else if (访问路径 === 'fixed-sub') {//处理固定订阅请求
+                    const 订阅TOKEN = await MD5MD5(host + userID);
+                    const requestToken = url.searchParams.get('token');
+                    const configId = url.searchParams.get('id');
+                    if (requestToken === 订阅TOKEN) {
+                        config_JSON = await 读取config_JSON(env, host, userID, env.PATH);
+                        ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_Fixed_SUB', config_JSON));
+                        let 固定配置模板 = null;
+                        if (configId) {
+                            const 配置列表JSON = await env.KV.get('fixed-configs.json');
+                            if (配置列表JSON) {
+                                try {
+                                    const 配置列表 = JSON.parse(配置列表JSON);
+                                    const 指定配置 = 配置列表.find(c => c.id === configId);
+                                    if (指定配置 && 指定配置.token === requestToken) {
+                                        固定配置模板 = 指定配置.config;
+                                    }
+                                } catch (e) { }
+                            }
+                        }
+                        if (!固定配置模板) {
+                            return new Response('固定配置信息未设置', { status: 404 });
+                        }
+                        const vlessRegex = /vless:\/\/([^@]+)@([^:]+):([^?]+)\?(.+)#(.+)/;
+                        const match = 固定配置模板.match(vlessRegex);
+                        if (!match) {
+                            return new Response('固定配置信息格式错误', { status: 400 });
+                        }
+                        const [, uuid, originalIP, port, params, remark] = match;
+                        const 完整优选列表 = config_JSON.优选订阅生成.本地IP库.随机IP 
+                            ? (await 生成随机IP(request, config_JSON.优选订阅生成.本地IP库.随机数量, config_JSON.优选订阅生成.本地IP库.指定端口))[0] 
+                            : await env.KV.get('ADD.txt') 
+                                ? await 整理成数组(await env.KV.get('ADD.txt')) 
+                                : (await 生成随机IP(request, config_JSON.优选订阅生成.本地IP库.随机数量, config_JSON.优选订阅生成.本地IP库.指定端口))[0];
+                        const 优选API = [], 优选IP = [];
+                        for (const 元素 of 完整优选列表) {
+                            if (元素.toLowerCase().startsWith('https://')) {
+                                优选API.push(元素);
+                            } else {
+                                优选IP.push(元素);
+                            }
+                        }
+                        let 完整优选IP = 优选IP;
+                        if (优选API.length > 0) {
+                            const 请求优选API内容 = await 请求优选API(优选API);
+                            const 优选API的IP = 请求优选API内容[0];
+                            完整优选IP = [...new Set(优选IP.concat(优选API的IP))];
+                        }
+                        const 订阅内容 = 完整优选IP.map(ip => {
+                            let 节点地址 = ip, 节点端口 = port, 节点备注 = remark;
+                            if (ip.includes('#')) {
+                                const parts = ip.split('#');
+                                节点地址 = parts[0];
+                                节点备注 = parts[1] || remark;
+                            }
+                            if (节点地址.includes(':')) {
+                                const addrParts = 节点地址.split(':');
+                                节点地址 = addrParts[0];
+                                节点端口 = addrParts[1] || port;
+                            }
+                            return `vless://${uuid}@${节点地址}:${节点端口}?${params}#${encodeURIComponent(decodeURIComponent(节点备注))}`;
+                        }).join('\n');
+                        return new Response(btoa(订阅内容), { status: 200, headers: { 'Content-Type': 'text/plain;charset=utf-8' } });
+                    }
+                    return new Response('无效的订阅TOKEN', { status: 403 });
                 } else if (访问路径 === 'sub') {//处理订阅请求
                     const 订阅TOKEN = await MD5MD5(host + userID);
                     if (url.searchParams.get('token') === 订阅TOKEN) {
